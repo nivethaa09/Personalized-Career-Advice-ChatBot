@@ -1,21 +1,29 @@
 from typing import List, Dict, Any
-from utils import perform_hybrid_search, generate_follow_up_questions
+from sentence_transformers import SentenceTransformer
+import chromadb
+from utils import generate_follow_up_questions
 import openai
 from dotenv import load_dotenv
 import os
 
-#variables from .env file
+# environment variables
 load_dotenv()
+
+# Chroma and Sentence Transformers setup
+client = chromadb.Client()
+collection_name = "career_advice"
+collection = client.get_collection(name=collection_name)
+model = SentenceTransformer('all-MiniLM-L6-v2')  # Use your preferred model
+
 openai.api_key = os.getenv('OPENAI_API_KEY')
 
 def generate_response_with_rag(query: str, sources: List[Dict[str, Any]]) -> str:
     """Generate a response using the retrieved context and the user's query."""
-    #the prompt by combining query and retrieved documents
     context = "\n".join([source["snippet"] for source in sources])
     prompt = f"User Query: {query}\n\nContext:\n{context}\n\nAnswer:"
 
     try:
-        #OpenAI to generate a response
+        # OpenAI to generate a response
         response = openai.Completion.create(
             engine="text-davinci-003",
             prompt=prompt,
@@ -29,13 +37,23 @@ def generate_response_with_rag(query: str, sources: List[Dict[str, Any]]) -> str
     except Exception as e:
         return f"Error generating response: {str(e)}"
 
+def perform_hybrid_search(query: str) -> List[Dict[str, str]]:
+    """Perform hybrid search: keyword-based + semantic search using ChromaDB."""
+    query_embedding = model.encode([query])[0] 
+    results = collection.query(query_embeddings=[query_embedding], n_results=5) 
+   
+    keyword_results = []  # Placeholder for keyword search results
+
+    #keyword search and semantic search results
+    sources = keyword_results + [{"snippet": result["document"], "source": result["metadata"]["source"]} for result in results["documents"]]
+    return sources
+
 def process_query(query: str, conversation_history: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Process user query and generate response with sources and follow-up questions."""
-    
-    # Perform hybrid search
+    # hybrid search
     sources = perform_hybrid_search(query)
     
-    # Determine the topic based on the query
+    #topic based on the query
     query_lower = query.lower()
     if "resume" in query_lower:
         topic = "resume writing"
@@ -48,16 +66,15 @@ def process_query(query: str, conversation_history: List[Dict[str, Any]]) -> Dic
     else:
         topic = "career development"
     
-    #RAG (Retrieval-Augmented Generation)
+    # response using RAG
     if not sources:
         content = ("I don't have specific information about that in my knowledge base. "
                   "However, I can offer some general career advice. Would you like to "
                   "focus on a different career-related topic?")
     else:
-        #RAG to generate a response based on query + retrieved context
         content = generate_response_with_rag(query, sources)
     
-    # Follow-up questions based on topic
+    
     follow_up_questions = generate_follow_up_questions(topic, sources)
     
     return {
