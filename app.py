@@ -1,55 +1,56 @@
+# app.py
 import streamlit as st
-from utils import perform_hybrid_search
-from chatbot import process_query
+from chatbot import CareerChatbot
+from utils import load_data  
 
-st.set_page_config(page_title="Career Advisor Chatbot", layout="wide")
-st.title("Personalized Career Advisor Chatbot")
+# Streamlit page configuration
+st.set_page_config(page_title="Career Advisor", layout="centered")
+st.title("🎯 Personalized Career Advice Chatbot")
 
-# Initialize chat history in session state if it doesn't exist
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+corpus = load_data()  
 
-# Display chat messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
-        if "sources" in message and message["sources"]:
-            with st.expander("View Sources"):
-                for source in message["sources"]:
-                    st.write(f"- {source['title']}: {source['snippet']}")
+# Initialize chatbot and vector DB
+if 'chatbot' not in st.session_state:
+    st.session_state['chatbot'] = CareerChatbot()
+    st.session_state['chatbot'].add_documents(corpus)
 
-# Chat input
-if prompt := st.chat_input("Ask me about career advice..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
-    
-    # chatbot response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = process_query(prompt, st.session_state.messages)
-            
-            st.write(response["content"])
-            
-            if response["sources"]:
-                with st.expander("View Sources"):
-                    for source in response["sources"]:
-                        st.write(f"- {source['title']}: {source['snippet']}")
-            
-            # follow-up questions
-            if response["follow_up_questions"]:
-                st.write("\nFollow-up questions:")
-                for question in response["follow_up_questions"]:
-                    if st.button(question, key=question):
-                        st.session_state.messages.append({
-                            "role": "user",
-                            "content": question
-                        })
-                        st.rerun()
-    
-    # assistant response to chat history
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": response["content"],
-        "sources": response["sources"]
-    })
+# Initialize conversation history
+if 'conversation_history' not in st.session_state:
+    st.session_state['conversation_history'] = []
+
+# Display conversation
+def display_conversation():
+    for query, response, sources, followup in st.session_state['conversation_history']:
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        with st.chat_message("assistant"):
+            st.markdown(response)
+            if sources:
+                st.markdown("📚 **Sources:**")
+                for source, score in sources:
+                    st.markdown(f"- `{source}` — Score: `{score:.4f}`")
+            if followup:
+                st.markdown(f"🤔 **Follow-up Suggestion:** {followup}")
+
+# Input box for user query
+user_query = st.chat_input("Ask me anything about your career...")
+
+# Handle new query
+if user_query:
+    chatbot = st.session_state['chatbot']
+    response_text, sources, followup = chatbot.handle_query(user_query, corpus)
+
+    # Store the conversation history
+    st.session_state['conversation_history'].append(
+        (user_query, response_text, sources, followup)
+    )
+
+    # track latest values separately for display
+    st.session_state['last_response'] = response_text
+    st.session_state['last_sources'] = sources
+    st.session_state['last_followup'] = followup
+    st.session_state['previous_query'] = user_query
+
+# Display the chat history
+display_conversation()
