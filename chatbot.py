@@ -1,84 +1,77 @@
-from typing import List, Dict, Any
-from sentence_transformers import SentenceTransformer
-import chromadb
-from utils import generate_follow_up_questions
-import openai
-from dotenv import load_dotenv
+# chatbot.py
 import os
+from groq import Groq
+import chromadb
+from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
+from search import perform_hybrid_search
 
-# environment variables
 load_dotenv()
 
-# Chroma and Sentence Transformers setup
-client = chromadb.Client()
-collection_name = "career_advice"
-collection = client.get_collection(name=collection_name)
-model = SentenceTransformer('all-MiniLM-L6-v2')  # Use your preferred model
+class CareerChatbot:
+    def __init__(self):
+        self.vector_db = self._setup_vector_db()
+        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        self.chat_history = []
 
-openai.api_key = os.getenv('OPENAI_API_KEY')
+    def _setup_vector_db(self):
+        client = chromadb.Client()
+        embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        return client.get_or_create_collection(name="career_guidance", embedding_function=embedding_fn)
+    
+    def add_documents(self, documents: list):
+        for i, doc in enumerate(documents):
+            self.vector_db.add(documents=[doc], ids=[f"doc_{i}"])
 
-def generate_response_with_rag(query: str, sources: List[Dict[str, Any]]) -> str:
-    """Generate a response using the retrieved context and the user's query."""
-    context = "\n".join([source["snippet"] for source in sources])
-    prompt = f"User Query: {query}\n\nContext:\n{context}\n\nAnswer:"
+    def generate_response(self, user_input: str, relevant_texts: list):
+        max_context_chars = 8000  
+        context = ""
 
-    try:
-        # OpenAI to generate a response
-        response = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
-            max_tokens=300,
-            n=1,
-            stop=None,
-            temperature=0.7
+        for text in relevant_texts:
+            if len(context) + len(text) > max_context_chars:
+                break
+            context += text + "\n\n"
+
+        prompt = f"Context: {context}\n\nUser: {user_input}\nAssistant:"
+        chat_response = self.client.chat.completions.create(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
+            messages=[{"role": "user", "content": prompt}]
         )
-        generated_answer = response.choices[0].text.strip()
-        return generated_answer
-    except Exception as e:
-        return f"Error generating response: {str(e)}"
+        response_text = chat_response.choices[0].message.content
 
-def perform_hybrid_search(query: str) -> List[Dict[str, str]]:
-    """Perform hybrid search: keyword-based + semantic search using ChromaDB."""
-    query_embedding = model.encode([query])[0] 
-    results = collection.query(query_embeddings=[query_embedding], n_results=5) 
-   
-    keyword_results = []  # Placeholder for keyword search results
+        # Dynamically generate a follow-up question
+        followup_question = self.generate_dynamic_followup(user_input, relevant_texts)
 
-    #keyword search and semantic search results
-    sources = keyword_results + [{"snippet": result["document"], "source": result["metadata"]["source"]} for result in results["documents"]]
-    return sources
+        # sources for display
+        sources = [(f"doc_{i}", 0.0) for i, _ in enumerate(relevant_texts)]
 
-def process_query(query: str, conversation_history: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Process user query and generate response with sources and follow-up questions."""
-    # hybrid search
-    sources = perform_hybrid_search(query)
-    
-    #topic based on the query
-    query_lower = query.lower()
-    if "resume" in query_lower:
-        topic = "resume writing"
-    elif "data" in query_lower and ("science" in query_lower or "scientist" in query_lower):
-        topic = "data science careers"
-    elif "software" in query_lower or "developer" in query_lower:
-        topic = "software development"
-    elif "trend" in query_lower or "market" in query_lower:
-        topic = "career trends"
-    else:
-        topic = "career development"
-    
-    # response using RAG
-    if not sources:
-        content = ("I don't have specific information about that in my knowledge base. "
-                  "However, I can offer some general career advice. Would you like to "
-                  "focus on a different career-related topic?")
-    else:
-        content = generate_response_with_rag(query, sources)
-    
-    
-    follow_up_questions = generate_follow_up_questions(topic, sources)
-    
-    return {
-        "content": content,
-        "sources": sources,
-        "follow_up_questions": follow_up_questions
-    }
+        return response_text, sources, followup_question
+
+    def generate_dynamic_followup(self, user_input, relevant_texts):
+        """
+        This function dynamically generates a follow-up question based on the user's input
+        and the content of the relevant texts retrieved.
+        """
+        # Default follow-up 
+        followup = None
+        
+        # Check for specific keywords or context within the relevant texts
+        if any("resume" in text.lower() for text in relevant_texts):
+            followup = "Would you like to learn more about tailoring your resume for specific job roles?"
+        elif any("interview" in text.lower() for text in relevant_texts):
+            followup = "Would you like advice on common interview questions or strategies to improve your interview skills?"
+        elif any("job market" in text.lower() for text in relevant_texts):
+            followup = "Would you like insights on the current job market and industries that are hiring?"
+        elif "skills" in user_input.lower() or "learning" in user_input.lower():
+            followup = "Would you like to explore the top skills needed for your career progression?"
+        else:
+            followup = "Would you like to dive deeper into related topics or get advice on another career aspect?"
+
+        return followup
+
+    def handle_query(self, query: str, corpus: list):
+        top_chunks = perform_hybrid_search(query, corpus)
+        return self.generate_response(query, top_chunks)
+
+    def handle_followup(self, followup: str, corpus: list):
+        return self.handle_query(followup, corpus)
